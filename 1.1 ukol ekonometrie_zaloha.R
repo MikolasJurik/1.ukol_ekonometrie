@@ -28,7 +28,7 @@ trh_ceny <- getSymbols("^GSPC", auto.assign=FALSE, from="2018-01-01", periodicit
 r_m <- ROC(Cl(trh_ceny), type="discrete")[-1,]
 
 # 3. stáhnutí $r_f$ z FRED (3M T-Bill) → měsíční $r_f$
-# stáhnutí roční sazba (% p.a.)
+# stáhnutí roční sazby (% p.a.)
 rf_data <- getSymbols("TB3MS", src="FRED", auto.assign=FALSE)
 # roční p.a. → efektivní měsíční $r_f$
 r_f <- (1 + rf_data/100)^(1/12) - 1
@@ -93,10 +93,10 @@ df_long <- df_excess %>%
   mutate(Akcie = str_remove(Akcie, "ex_")) # Smazání prefixu "ex_"
 
 
-# 2. Hromadný OLS odhad bety pro 50 akcií
+# 2. Hromadný OLS odhad bety pro 51 akcií
 # nest → seskupí data dle akcie
 # map + lm → 50x regrese
-# tidy → extrakce koeficientů do hezké tabulky
+# tidy → extrakce koeficientů do tabulky
 vysledky_capm <- df_long %>%
   nest(data = c(Datum, ex_rj, ex_rm)) %>%
   mutate(model = map(data, ~ lm(ex_rj ~ ex_rm, data = .x)),
@@ -104,12 +104,13 @@ vysledky_capm <- df_long %>%
   unnest(odhad) %>%
   select(Akcie, term, estimate, p.value)
 
-# Výpis jen beta koeficientů (prvních 6)
+# Výpis jen beta koeficientů
 bety <- vysledky_capm %>% 
   filter(term == "ex_rm") %>% 
   rename(Beta = estimate) %>%
   arrange(desc(Beta))
-print(head(bety))
+print(bety, n = Inf)
+
 
 # 3. Vizualizace regresních křivek (51 grafů v jednom) 
 graf_krivky <- ggplot(df_long, aes(x = ex_rm, y = ex_rj)) +
@@ -126,7 +127,7 @@ graf_krivky <- ggplot(df_long, aes(x = ex_rm, y = ex_rj)) +
 print(graf_krivky)
 
 # ===============================================================
-# 1.4 TEST H0: UROVNOVÁ KONSTANTA = 0
+# 1.4 TEST H0: ALFA = 0
 
 # 1. Extrakce urovńových konstant (Intercept) a p-hodnot
 alfy_test <- vysledky_capm %>%
@@ -168,3 +169,4 @@ graf_alfy <- ggplot(alfy_test, aes(x = reorder(Akcie, P_hodnota), y = P_hodnota,
        fill = "Výsledek testu: ")
 
 print(graf_alfy)
+
