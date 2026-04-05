@@ -1,0 +1,187 @@
+# PŘÍKLAD 2: TESTOVÁNÍ PLATNOSTI CAPM
+
+library(tidyverse)
+library(broom)
+library(ggplot2)
+
+# 2.1 SESTAVENÍ PORTFOLIÍ DLE BETA KOEFICIENTŮ
+
+# beta koeficienty z cvičení 1
+bety_p2 <- vysledky_capm %>%
+  filter(term == "ex_rm") %>%
+  select(Akcie, Beta = estimate)
+
+# extrakce rozptylu reziduí pro Fama-MacBeth test
+modely_p2 <- df_long %>%
+  nest(data = c(Datum, ex_rj, ex_rm)) %>%
+  mutate(
+    model  = map(data, ~ lm(ex_rj ~ ex_rm, data = .x)),
+    sigma2 = map_dbl(model, ~ var(residuals(.x)))   # σ2_εj
+  ) %>%
+  select(Akcie, sigma2)
+
+# přiřazení akcií do 10 portfolií dle beta (sestupně: P10 = nejvyšší)
+params_p2 <- bety_p2 %>%
+  left_join(modely_p2, by = "Akcie") %>%
+  arrange(Beta) %>%
+  mutate(
+    Portfolio = paste0("P", sprintf("%02d", ntile(Beta, 10)))
+  )
+
+cat("Rozdělení akcií do portfolií:\n")
+print(params_p2 %>% group_by(Portfolio) %>%
+        summarise(n = n(), Beta_min = min(Beta), Beta_max = max(Beta)))
+
+# výpočet průměrných výnosů portfolií (equal-weighted)
+# měsíční výnosy portfolia = průměr nadvýnosů akcií v portfoliu
+df_portfolia <- df_long %>%
+  left_join(params_p2 %>% select(Akcie, Portfolio), by = "Akcie") %>%
+  group_by(Datum, Portfolio) %>%
+  summarise(rp = mean(ex_rj), .groups = "drop")
+
+# agregace přes celé období: průměrný měsíční nadvýnos portfolia
+rp_mean <- df_portfolia %>%
+  group_by(Portfolio) %>%
+  summarise(rp_avg = mean(rp), .groups = "drop")
+
+# beta portfolia = aritmetický průměr individuálních bet
+beta_p <- params_p2 %>%
+  group_by(Portfolio) %>%
+  summarise(
+    Beta_p   = mean(Beta),       # průměrná beta portfolia
+    sigma2_p = mean(sigma2),     # průměrný σ2 pro referenci
+    n_akcii  = n(),
+    .groups  = "drop"
+  )
+
+# finální datová sada pro SML
+data_sml <- beta_p %>%
+  left_join(rp_mean, by = "Portfolio")
+
+cat("\nPřehled portfolií (beta × průměrný výnos):\n")
+print(data_sml)
+
+# 2.2 SECURITY MARKET LINE (SML)
+
+# ols: r̄_pi = γ0 + γ1 * β_pi + ε_pi
+# (r̄_pi je nadvýnos portfolia — rf již odečteno v Příkladu 1)
+model_sml <- lm(rp_avg ~ Beta_p, data = data_sml)
+summ_sml  <- summary(model_sml)
+tidy_sml  <- tidy(model_sml)
+
+cat("\n=== Odhad Security Market Line ===\n")
+print(tidy_sml)
+cat(sprintf("R2 = %.4f\n", summ_sml$r.squared))
+
+# průměrná tržní riziková prémie — benchmark γ1
+trzni_premie <- mean(df_long$ex_rm, na.rm = TRUE)
+gamma0 <- coef(model_sml)[1]
+gamma1 <- coef(model_sml)[2]
+p_g0   <- tidy_sml %>% filter(term == "(Intercept)") %>% pull(p.value)
+p_g1   <- tidy_sml %>% filter(term == "Beta_p")      %>% pull(p.value)
+
+cat(sprintf("\nBenchmark γ1 (průměrná tržní prémie): %.6f\n", trzni_premie))
+cat(sprintf("Odhadnuté γ1:                          %.6f\n", gamma1))
+cat(sprintf("\nTest γ0 = 0: p-value = %.4f → %s\n",
+            p_g0, ifelse(p_g0 < 0.05, "ZAMÍTÁME H0", "NEZAMÍTÁME H0")))
+cat(sprintf("Test γ1 = tržní prémie: γ1 = %.6f vs. benchmark = %.6f\n",
+            gamma1, trzni_premie))
+
+# SML vizualizace
+graf_sml <- ggplot(data_sml, aes(x = Beta_p, y = rp_avg)) +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text(aes(label = Portfolio), vjust = -0.7, size = 3) +
+  # Odhadnutá SML (OLS)
+  geom_smooth(method = "lm", se = TRUE,
+              color = "tomato", linewidth = 0.8,
+              fill = "tomato", alpha = 0.1) +
+  # Teoretická SML dle CAPM (γ0 = 0, γ1 = tržní prémie)
+  geom_abline(intercept = 0, slope = trzni_premie,
+              linetype = "dashed", color = "darkgreen", linewidth = 0.8) +
+  theme_minimal() +
+  labs(
+    title    = "Security Market Line (SML) — 10 portfolií dle beta",
+    subtitle = sprintf("y1 = %.5f (p = %.3f)    y2 = %.5f (p = %.3f)",
+                       gamma0, p_g0, gamma1, p_g1),
+    x       = "Beta koeficient portfolia (β̂p)",
+    y       = "Průměrný měsíční nadvýnos portfolia (r̄p − rf)",
+    caption = "Červená = odhadnutá SML  |  Zelená přerušovaná = teoretická SML (CAPM: γ0 = 0)"
+  )
+print(graf_sml)
+
+# 2.3 TEST FAMA-MACBETH / GIBBONS (1982)
+# Specifikace cross-sekční regrese na individuálních akciích:
+#   r̄j = δ1 + δ2·βj + δ3·βj2 + δ4·σ2εj + ε
+
+# průměrné nadvýnosy individuálních akcií (závisle proměnná)
+rj_mean <- df_long %>%
+  group_by(Akcie) %>%
+  summarise(rj_avg = mean(ex_rj), .groups = "drop")
+
+# Datová sada: beta, beta2, sigma2
+data_fm <- params_p2 %>%
+  left_join(rj_mean, by = "Akcie") %>%
+  mutate(Beta2 = Beta^2)
+
+# Modely porovnání
+
+# Model 1: Základní SML na individuálních akciích (lineární)
+model_fm1 <- lm(rj_avg ~ Beta, data = data_fm)
+
+# Model 2: Plná Fama-MacBeth specifikace
+model_fm2 <- lm(rj_avg ~ Beta + Beta2 + sigma2, data = data_fm)
+
+summ_fm2 <- summary(model_fm2)
+tidy_fm2 <- tidy(model_fm2) %>%
+  mutate(
+    stars = case_when(
+      p.value < 0.01 ~ "***",
+      p.value < 0.05 ~ "**",
+      p.value < 0.10 ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+cat("\n=== Fama-MacBeth / Gibbons test ===\n")
+print(tidy_fm2 %>% select(term, estimate, std.error, p.value, stars))
+cat(sprintf("R2 = %.4f\n", summ_fm2$r.squared))
+
+# výsledky testů klíčových hypotéz
+delta3_p <- summ_fm2$coefficients["Beta2",  4]
+delta4_p <- summ_fm2$coefficients["sigma2", 4]
+
+cat(sprintf("\n[TEST LINEARITY]        H0: δ3 = 0  →  p-value = %.4f  →  %s\n",
+            delta3_p, ifelse(delta3_p < 0.05, "ZAMÍTÁME H0 ✗", "NEZAMÍTÁME H0 ✓")))
+cat(sprintf("[TEST SYS. RIZIKA]      H0: δ4 = 0  →  p-value = %.4f  →  %s\n",
+            delta4_p, ifelse(delta4_p < 0.05, "ZAMÍTÁME H0 ✗", "NEZAMÍTÁME H0 ✓")))
+
+# vizualizace: koeficienty FM testu s intervalem spolehlivosti
+graf_fm <- tidy_fm2 %>%
+  mutate(
+    term_label = recode(term,
+                        "(Intercept)" = "δ1 (intercept)",
+                        "Beta"        = "δ2 (β)",
+                        "Beta2"       = "δ3 (β2)",
+                        "sigma2"      = "δ4 (σ2ε)"
+    )
+  ) %>%
+  ggplot(aes(x = term_label, y = estimate,
+             ymin = estimate - 2 * std.error,
+             ymax = estimate + 2 * std.error,
+             color = p.value < 0.05)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_pointrange(linewidth = 0.8) +
+  geom_text(aes(label = stars), vjust = -1.2, size = 4, color = "black") +
+  coord_flip() +
+  scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "steelblue"),
+                     labels = c("TRUE" = "Sig. (p < 0.05)", "FALSE" = "Nesig."),
+                     name = "") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(
+    title    = "Fama-MacBeth test: odhady koeficientů (±2 SE)",
+    subtitle = "H0: δ3 = 0 (linearita)  a  δ4 = 0 (pouze systematické riziko)",
+    x = NULL,
+    y = "Odhad koeficientu"
+  )
+print(graf_fm)
