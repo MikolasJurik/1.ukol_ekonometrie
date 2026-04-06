@@ -1,0 +1,206 @@
+# ===========================================================
+# 3.2 Security Market Line - dva subperiody (pred/po zlomu)
+# ===========================================================
+# Pouzivame beta_pre a beta_post z break_results
+# a odpovidajici prumerne nadvynosy portfolii v kazdem obdobi
+
+# -----------------------------------------------------------
+# 2.1 Priprava dat - prumerne nadvynosy portfolii v obou obdobich
+# -----------------------------------------------------------
+
+# Nadvynosy v pre-break obdobi
+portfolio_pre <- df_long_break %>%
+  filter(post_break == 0) %>%
+  group_by(Akcie) %>%
+  summarise(mean_ex_rj = mean(ex_rj, na.rm = TRUE), .groups = "drop") %>%
+  left_join(break_results %>% select(Akcie, beta_pre), by = "Akcie") %>%
+  rename(beta = beta_pre) %>%
+  mutate(Obdobi = "Pred zlomem")
+
+# Nadvynosy v post-break obdobi
+portfolio_post <- df_long_break %>%
+  filter(post_break == 1) %>%
+  group_by(Akcie) %>%
+  summarise(mean_ex_rj = mean(ex_rj, na.rm = TRUE), .groups = "drop") %>%
+  left_join(break_results %>% select(Akcie, beta_post), by = "Akcie") %>%
+  rename(beta = beta_post) %>%
+  mutate(Obdobi = "Po zlomu")
+
+portfolio_sml_32 <- bind_rows(portfolio_pre, portfolio_post)
+
+# -----------------------------------------------------------
+# 2.2 Tvorba portfolii serazenych dle bety (min 10 portfolii)
+# -----------------------------------------------------------
+n_portfolios <- 10
+
+make_portfolios <- function(df) {
+  df %>%
+    arrange(beta) %>%
+    mutate(portfolio = ntile(beta, n_portfolios)) %>%
+    group_by(portfolio) %>%
+    summarise(
+      beta_p    = mean(beta, na.rm = TRUE),
+      mean_ex_rp = mean(mean_ex_rj, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+portfolios_pre  <- portfolio_pre  %>% make_portfolios() %>% mutate(Obdobi = "Pred zlomem")
+portfolios_post <- portfolio_post %>% make_portfolios() %>% mutate(Obdobi = "Po zlomu")
+portfolios_32   <- bind_rows(portfolios_pre, portfolios_post)
+
+# -----------------------------------------------------------
+# 2.3 Odhad SML pro kazde obdobi
+# -----------------------------------------------------------
+sml_models_32 <- portfolios_32 %>%
+  group_by(Obdobi) %>%
+  nest() %>%
+  mutate(
+    model   = map(data, ~ lm(mean_ex_rp ~ beta_p, data = .x)),
+    tidy    = map(model, tidy),
+    glance  = map(model, glance)
+  )
+
+sml_coefs_32 <- sml_models_32 %>%
+  select(Obdobi, tidy) %>%
+  unnest(cols = tidy) %>%
+  select(Obdobi, term, estimate, std.error, statistic, p.value) %>%
+  mutate(term = case_when(
+    term == "(Intercept)" ~ "gamma0 (intercept)",
+    term == "beta_p"      ~ "gamma1 (slope)",
+    TRUE                  ~ term
+  ))
+
+print(sml_coefs_32)
+
+# Pozorova trzni rizikova premie v obou obdobich (pro porovnani s gamma1)
+market_rp_pre <- df_long_break %>%
+  filter(post_break == 0) %>%
+  summarise(mean_ex_rm = mean(ex_rm, na.rm = TRUE)) %>%
+  pull(mean_ex_rm)
+
+market_rp_post <- df_long_break %>%
+  filter(post_break == 1) %>%
+  summarise(mean_ex_rm = mean(ex_rm, na.rm = TRUE)) %>%
+  pull(mean_ex_rm)
+
+cat("Pozorovana trzni rizikova premie pred zlomem:", round(market_rp_pre, 4), "\n")
+cat("Pozorovana trzni rizikova premie po zlomu:  ", round(market_rp_post, 4), "\n")
+
+# -----------------------------------------------------------
+# 2.4 Vizualizace SML pro obe obdobi
+# -----------------------------------------------------------
+graf_sml_32 <- ggplot(portfolios_32, aes(x = beta_p, y = mean_ex_rp, color = Obdobi)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+  theme_minimal() +
+  labs(
+    title = "Ukol 3.2 - Security Market Line: pred a po strukturialnim zlomu",
+    x     = "Beta portfolia",
+    y     = "Prumerny nadvynos portfolia",
+    color = "Obdobi"
+  )
+
+print(graf_sml_32)
+
+
+# ===========================================================
+# 3.4 Security Market Line - Bull vs. Bear trh
+# ===========================================================
+# Pouzivame beta_up a beta_down z asym_results
+# Bull obdobi: mesice kdy ex_rm >= 0 -> pouzivame beta_up
+# Bear obdobi: mesice kdy ex_rm <  0 -> pouzivame beta_down
+
+# -----------------------------------------------------------
+# 4.1 Priprava dat - prumerne nadvynosy ve vzestupnych/klesajicich mesicich
+# -----------------------------------------------------------
+portfolio_bull <- df_long_asym %>%
+  filter(ex_rm_plus > 0) %>%
+  group_by(Akcie) %>%
+  summarise(mean_ex_rj = mean(ex_rj, na.rm = TRUE), .groups = "drop") %>%
+  left_join(asym_results %>% select(Akcie, beta_up), by = "Akcie") %>%
+  rename(beta = beta_up) %>%
+  mutate(Trh = "Bull (rust)")
+
+portfolio_bear <- df_long_asym %>%
+  filter(ex_rm_minus < 0) %>%
+  group_by(Akcie) %>%
+  summarise(mean_ex_rj = mean(ex_rj, na.rm = TRUE), .groups = "drop") %>%
+  left_join(asym_results %>% select(Akcie, beta_down), by = "Akcie") %>%
+  rename(beta = beta_down) %>%
+  mutate(Trh = "Bear (pokles)")
+
+# -----------------------------------------------------------
+# 4.2 Tvorba portfolii serazenych dle bety (10 portfolii)
+# -----------------------------------------------------------
+n_portfolios <- 10
+
+make_portfolios <- function(df) {
+  df %>%
+    arrange(beta) %>%
+    mutate(portfolio = ntile(beta, n_portfolios)) %>%
+    group_by(portfolio) %>%
+    summarise(
+      beta_p     = mean(beta, na.rm = TRUE),
+      mean_ex_rp = mean(mean_ex_rj, na.rm = TRUE),
+      .groups    = "drop"
+    )
+}
+
+portfolios_bull <- portfolio_bull %>% make_portfolios() %>% mutate(Trh = "Bull (rust)")
+portfolios_bear <- portfolio_bear %>% make_portfolios() %>% mutate(Trh = "Bear (pokles)")
+portfolios_34   <- bind_rows(portfolios_bull, portfolios_bear)
+
+# -----------------------------------------------------------
+# 4.3 Odhad SML pro bull a bear obdobi
+# -----------------------------------------------------------
+sml_models_34 <- portfolios_34 %>%
+  group_by(Trh) %>%
+  nest() %>%
+  mutate(
+    model  = map(data, ~ lm(mean_ex_rp ~ beta_p, data = .x)),
+    tidy   = map(model, tidy),
+    glance = map(model, glance)
+  )
+
+sml_coefs_34 <- sml_models_34 %>%
+  select(Trh, tidy) %>%
+  unnest(cols = tidy) %>%
+  select(Trh, term, estimate, std.error, statistic, p.value) %>%
+  mutate(term = case_when(
+    term == "(Intercept)" ~ "gamma0 (intercept)",
+    term == "beta_p"      ~ "gamma1 (slope)",
+    TRUE                  ~ term
+  ))
+
+print(sml_coefs_34)
+
+# Pozorovana trzni rizikova premie v bull/bear obdobich (pro porovnani s gamma1)
+market_rp_bull <- df_long_asym %>%
+  filter(ex_rm_plus > 0) %>%
+  summarise(mean_ex_rm = mean(ex_rm, na.rm = TRUE)) %>%
+  pull(mean_ex_rm)
+
+market_rp_bear <- df_long_asym %>%
+  filter(ex_rm_minus < 0) %>%
+  summarise(mean_ex_rm = mean(ex_rm, na.rm = TRUE)) %>%
+  pull(mean_ex_rm)
+
+cat("Pozorovana trzni rizikova premie (bull):", round(market_rp_bull, 4), "\n")
+cat("Pozorovana trzni rizikova premie (bear):", round(market_rp_bear, 4), "\n")
+
+# -----------------------------------------------------------
+# 4.4 Vizualizace SML pro bull a bear obdobi
+# -----------------------------------------------------------
+graf_sml_34 <- ggplot(portfolios_34, aes(x = beta_p, y = mean_ex_rp, color = Trh)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+  theme_minimal() +
+  labs(
+    title = "Ukol 3.4 - Security Market Line: Bull vs. Bear trh",
+    x     = "Beta portfolia",
+    y     = "Prumerny nadvynos portfolia",
+    color = "Obdobi trhu"
+  )
+
+print(graf_sml_34)
